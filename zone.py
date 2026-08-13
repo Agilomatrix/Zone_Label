@@ -41,14 +41,25 @@ REQUIRED_COLUMNS = [
 
 DATA_STORE = Path("data")
 DATA_STORE.mkdir(exist_ok=True)
-MASTER_FILE = DATA_STORE / "mastersheet.parquet"
+MASTER_FILE = DATA_STORE / "mastersheet.csv"
 
 DPI = 300
 MM_TO_PX = DPI / 25.4
 LABEL_WIDTH_MM = 297
 LABEL_HEIGHT_MM = 210
 
-FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
+# Ship the font with the app (system font paths aren't guaranteed to exist
+# on every deployment target, e.g. Streamlit Community Cloud).
+_APP_DIR = Path(__file__).parent
+_BUNDLED_FONT = _APP_DIR / "fonts" / "DejaVuSerif-Bold.ttf"
+_SYSTEM_FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf")
+
+if _BUNDLED_FONT.exists():
+    FONT_BOLD = str(_BUNDLED_FONT)
+elif _SYSTEM_FONT.exists():
+    FONT_BOLD = str(_SYSTEM_FONT)
+else:
+    FONT_BOLD = None  # fall back to PIL's default bitmap font
 
 st.set_page_config(page_title="Zone Label Generator", layout="wide")
 
@@ -63,20 +74,22 @@ def mm_to_px(mm: float) -> int:
 # deployed app)
 # --------------------------------------------------------------------------
 def save_master(df: pd.DataFrame) -> None:
-    df.to_parquet(MASTER_FILE, index=False)
+    df.to_csv(MASTER_FILE, index=False)
 
 
 def load_master() -> pd.DataFrame | None:
     if MASTER_FILE.exists():
-        return pd.read_parquet(MASTER_FILE)
+        return pd.read_csv(MASTER_FILE)
     return None
 
 
 # --------------------------------------------------------------------------
 # Label rendering
 # --------------------------------------------------------------------------
-def fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_size: int) -> ImageFont.FreeTypeFont:
+def fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_size: int):
     """Shrink font size until the text fits within max_width."""
+    if FONT_BOLD is None:
+        return ImageFont.load_default()
     size = max_size
     while size > 10:
         font = ImageFont.truetype(FONT_BOLD, size)
