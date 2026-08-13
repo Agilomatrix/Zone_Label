@@ -44,6 +44,7 @@ REQUIRED_COLUMNS = [
 DATA_STORE = Path("data")
 DATA_STORE.mkdir(exist_ok=True)
 MASTER_FILE = DATA_STORE / "mastersheet.csv"
+APP_URL_FILE = DATA_STORE / "app_url.txt"
 
 DPI = 300
 MM_TO_PX = DPI / 25.4
@@ -2804,6 +2805,16 @@ def load_master() -> pd.DataFrame | None:
     return None
 
 
+def save_app_url(url: str) -> None:
+    APP_URL_FILE.write_text(url.strip(), encoding="utf-8")
+
+
+def load_app_url() -> str:
+    if APP_URL_FILE.exists():
+        return APP_URL_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
 # --------------------------------------------------------------------------
 # Label rendering
 # --------------------------------------------------------------------------
@@ -2902,16 +2913,22 @@ st.write(
 
 with st.sidebar:
     st.header("Settings")
-    default_url = st.session_state.get("app_url", "")
+    # Default from disk first (persists across restarts / other users),
+    # falling back to whatever was set earlier in this browser session.
+    default_url = st.session_state.get("app_url") or load_app_url()
     app_url = st.text_input(
         "Public App URL (for QR codes)",
         value=default_url,
         placeholder="https://your-app.streamlit.app",
         help="The QR codes will link to <this URL>/?zone=<zone name>. "
         "Must be the address people's phones can actually reach — "
-        "not 'localhost' — for scanning to work.",
+        "not 'localhost' — for scanning to work. Set this once; it's "
+        "remembered for all future visits.",
     )
     st.session_state["app_url"] = app_url
+    if app_url.strip() and app_url.strip() != load_app_url():
+        save_app_url(app_url)
+        st.caption("✅ Saved — you won't need to re-enter this next time.")
 
 uploaded_file = st.file_uploader(
     "Upload Master Sheet", type=["xlsx", "xls", "csv"]
