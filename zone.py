@@ -3188,7 +3188,52 @@ def fit_font(draw: ImageDraw.ImageDraw, text: str, max_width: int, max_size: int
     return get_font(10)
 
 
-def generate_label(zone_name: str, qr_data: str) -> Image.Image:
+def _wrap_text(draw, text, font, max_width):
+    """Greedy word-wrap: split text into lines that each fit max_width."""
+    words = text.split()
+    lines, current = [], ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        w = draw.textbbox((0, 0), trial, font=font)[2]
+        if w <= max_width or not current:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _fit_multiline(draw, text, max_width, max_height, max_size=600, min_size=20):
+    """Find the largest font size where `text`, word-wrapped to max_width,
+    fits within max_height. Returns (font, lines, line_height)."""
+    best = None
+    size = max_size
+    while size >= min_size:
+        font = get_font(size)
+        lines = _wrap_text(draw, text, font, max_width)
+        line_bbox = draw.textbbox((0, 0), "Mg", font=font)
+        line_h = (line_bbox[3] - line_bbox[1]) * 1.25  # a bit of leading
+        total_h = line_h * len(lines)
+        widest = max(draw.textbbox((0, 0), ln, font=font)[2] for ln in lines)
+        if total_h <= max_height and widest <= max_width:
+            best = (font, lines, line_h)
+            break
+        size -= 8
+    if best is None:
+        font = get_font(min_size)
+        lines = _wrap_text(draw, text, font, max_width)
+        line_bbox = draw.textbbox((0, 0), "Mg", font=font)
+        line_h = (line_bbox[3] - line_bbox[1]) * 1.25
+        best = (font, lines, line_h)
+    return best
+
+
+def generate_label(zone_name: str, qr_data: str | None) -> Image.Image:
+    """Build one zone label. If qr_data is None, the label is generated
+    WITHOUT a QR code (plain zone signage) — the zone name is blown up,
+    word-wrapped if needed, and centered to fill the whole page."""
     W, H = mm_to_px(LABEL_WIDTH_MM), mm_to_px(LABEL_HEIGHT_MM)
     img = Image.new("RGB", (W, H), "white")
     draw = ImageDraw.Draw(img)
@@ -3207,27 +3252,44 @@ def generate_label(zone_name: str, qr_data: str) -> Image.Image:
         width=max(1, int(W * 0.0015)),
     )
 
-    # Title text, centered, auto-shrunk to fit
     text = zone_name.upper()
     max_text_width = W - 2 * inner_margin - int(W * 0.06)
-    font = fit_font(draw, text, max_text_width, int(H * 0.20))
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text(
-        ((W - text_w) / 2 - bbox[0], H * 0.12 - bbox[1]),
-        text,
-        fill="black",
-        font=font,
-    )
 
-    # QR code, centered below the title
-    qr = qrcode.QRCode(box_size=10, border=2)
-    qr.add_data(qr_data)
-    qr.make(fit=True)
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_size = int(H * 0.42)
-    qr_img = qr_img.resize((qr_size, qr_size))
-    img.paste(qr_img, (int((W - qr_size) / 2), int(H * 0.42)))
+    if qr_data:
+        # Smaller title near the top, QR code fills the rest below it.
+        font = fit_font(draw, text, max_text_width, int(H * 0.20))
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        draw.text(
+            ((W - text_w) / 2 - bbox[0], H * 0.12 - bbox[1]),
+            text,
+            fill="black",
+            font=font,
+        )
+
+        # QR code, centered below the title
+        qr = qrcode.QRCode(box_size=10, border=2)
+        qr.add_data(qr_data)
+        qr.make(fit=True)
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = int(H * 0.42)
+        qr_img = qr_img.resize((qr_size, qr_size))
+        img.paste(qr_img, (int((W - qr_size) / 2), int(H * 0.42)))
+    else:
+        # No QR: the zone name is the ONLY content — blow it up (wrapping
+        # onto multiple lines if needed) so it fills nearly the whole page.
+        max_text_height = H - 2 * inner_margin - int(H * 0.08)
+        font, lines, line_h = _fit_multiline(
+            draw, text, max_text_width, max_text_height, max_size=int(H * 0.9)
+        )
+        total_h = line_h * len(lines)
+        start_y = (H - total_h) / 2
+        for i, line in enumerate(lines):
+            bbox = draw.textbbox((0, 0), line, font=font)
+            line_w = bbox[2] - bbox[0]
+            x = (W - line_w) / 2 - bbox[0]
+            y = start_y + i * line_h - bbox[1]
+            draw.text((x, y), line, fill="black", font=font)
 
     return img
 
@@ -3319,22 +3381,37 @@ st.write(
 
 with st.sidebar:
     st.header("Settings")
-    # Default from disk first (persists across restarts / other users),
-    # falling back to whatever was set earlier in this browser session.
-    default_url = st.session_state.get("app_url") or load_app_url()
-    app_url = st.text_input(
-        "Public App URL (for QR codes)",
-        value=default_url,
-        placeholder="https://your-app.streamlit.app",
-        help="The QR codes will link to <this URL>/?zone=<zone name>. "
-        "Must be the address people's phones can actually reach — "
-        "not 'localhost' — for scanning to work. Set this once; it's "
-        "remembered for all future visits.",
+
+    include_qr = st.toggle(
+        "Include QR code on labels",
+        value=st.session_state.get("include_qr", True),
+        help="Turn ON if your zone data lives in a WMS (or this app) and "
+        "you want scannable labels linked to live data. Turn OFF for "
+        "plain printed zone signage with no QR code — nothing to keep "
+        "in sync, nothing that can go stale.",
     )
-    st.session_state["app_url"] = app_url
-    if app_url.strip() and app_url.strip() != load_app_url():
-        save_app_url(app_url)
-        st.caption("✅ Saved — you won't need to re-enter this next time.")
+    st.session_state["include_qr"] = include_qr
+
+    app_url = ""
+    if include_qr:
+        # Default from disk first (persists across restarts / other users),
+        # falling back to whatever was set earlier in this browser session.
+        default_url = st.session_state.get("app_url") or load_app_url()
+        app_url = st.text_input(
+            "Public App URL (for QR codes)",
+            value=default_url,
+            placeholder="https://your-app.streamlit.app",
+            help="The QR codes will link to <this URL>/?zone=<zone name>. "
+            "Must be the address people's phones can actually reach — "
+            "not 'localhost' — for scanning to work. Set this once; it's "
+            "remembered for all future visits.",
+        )
+        st.session_state["app_url"] = app_url
+        if app_url.strip() and app_url.strip() != load_app_url():
+            save_app_url(app_url)
+            st.caption("✅ Saved — you won't need to re-enter this next time.")
+    else:
+        st.caption("QR codes disabled — labels will show zone names only.")
 
 uploaded_file = st.file_uploader(
     "Upload Master Sheet", type=["xlsx", "xls", "csv"]
@@ -3378,19 +3455,21 @@ with st.expander("Preview data", expanded=False):
 zones = sorted(df["Zone"].dropna().astype(str).str.strip().unique().tolist())
 st.write(f"**{len(zones)} zone(s) found:** {', '.join(zones)}")
 
-if not app_url:
+if include_qr and not app_url:
     st.warning(
         "Enter your app's public URL in the sidebar before generating labels, "
         "otherwise the QR codes won't be scannable from a phone."
     )
 
-if st.button("Generate Labels", type="primary", disabled=not app_url):
+generate_disabled = include_qr and not app_url
+
+if st.button("Generate Labels", type="primary", disabled=generate_disabled):
     zip_buffer = io.BytesIO()
     cols = st.columns(2)
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, zone in enumerate(zones):
-            qr_url = f"{app_url.rstrip('/')}/?zone={zone}"
+            qr_url = f"{app_url.rstrip('/')}/?zone={zone}" if include_qr else None
             label_img = generate_label(zone, qr_url)
 
             img_buffer = io.BytesIO()
